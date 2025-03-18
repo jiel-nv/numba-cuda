@@ -57,7 +57,7 @@ class CUDADIBuilder(DIBuilder):
         else:
             int_type = ir.IntType,
             real_type = ir.FloatType, ir.DoubleType
-            if (isinstance(lltype, int_type + real_type)):
+            if (argidx is None and isinstance(lltype, int_type + real_type)):
                 # Attempt to not mixing llvm.dbg.value' with llvm.dbg.declare
                 # for the same scalar variable. So don't emit declare here.
                 return
