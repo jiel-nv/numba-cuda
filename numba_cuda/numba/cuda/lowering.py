@@ -54,6 +54,7 @@ class CUDALower(Lower):
 
         self.poly_var_typ_map = {}
         self.poly_var_loc_map = {}
+        self.lastblk = max(self.blocks.keys())
 
         # When debug info is enabled, walk through function body and mark
         # variables with polymorphic types.
@@ -120,3 +121,18 @@ class CUDALower(Lower):
             # lowering with debuginfo
             or self._disable_sroa_like_opt
         )
+
+    def delvar(self, name):
+        """
+        Delete the given variable.
+        """
+        if self.context.enable_debuginfo and self._disable_sroa_like_opt:
+            index = name.find(".")
+            src_name = name[:index] if index > 0 else name
+            if (src_name in self.poly_var_loc_map and
+                not self._cur_ir_block == self.blocks[self.lastblk]):
+                # Do not zero finalize polymorphic variables unless in the
+                # last block to avoid overwrite values in the debug union
+                return
+
+        super().delvar(name)
