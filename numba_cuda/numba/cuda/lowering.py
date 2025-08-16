@@ -1866,10 +1866,17 @@ class CUDALower(Lower):
         """
         super().pre_lower()
 
+        # Polymorphic variables
         self.poly_var_typ_map = {}
         self.poly_var_loc_map = {}
         self.poly_var_set = set()
-        self.poly_cleaned = False
+
+        # Multi-versioned but single typed variables (m.v.s.t.)
+        self.mvst_var_typ_map = {}
+        self.mvst_var_loc_map = {}
+        self.mvst_var_set = set()
+
+        self.poly_mvst_cleaned = False
         self.lastblk = max(self.blocks.keys())
 
         # When debug info is enabled, walk through function body and mark
@@ -1892,9 +1899,13 @@ class CUDALower(Lower):
                         if isinstance(fetype, types.Literal):
                             fetype = fetype.literal_type
                         poly_map[src_name].add(fetype)
-            # Filter out multi-versioned but single typed variables
+            # Polymorphic variables and types map
             self.poly_var_typ_map = {
                 k: v for k, v in poly_map.items() if len(v) > 1
+            }
+            # m.v.s.t. variables and types map
+            self.mvst_var_typ_map = {
+                k: v for k, v in poly_map.items() if len(v) == 1
             }
 
     def _alloca_var(self, name, fetype):
@@ -1918,6 +1929,13 @@ class CUDALower(Lower):
                     # save the location of the union type for polymorphic var
                     self.poly_var_loc_map[src_name] = ptr
                 return
+            elif src_name in self.mvst_var_typ_map:
+                # Use single alloca to handle the m.v.s.t. variables
+                self.mvst_var_set.add(name)
+                if src_name not in self.mvst_var_loc_map:
+                    ptr = self.alloca(src_name, fetype)
+                    self.mvst_var_loc_map[src_name] = ptr
+                return
 
         super()._alloca_var(name, fetype)
 
@@ -1935,22 +1953,29 @@ class CUDALower(Lower):
         """
         Delete the given variable.
         """
-        if name in self.poly_var_set:
+        if name in self.poly_var_set or name in self.mvst_var_set:
             fetype = self.typeof(name)
             src_name = name.split(".")[0]
-            ptr = self.poly_var_loc_map[src_name]
+            if name in self.poly_var_set:
+                ptr = self.poly_var_loc_map[src_name]
+            else:
+                ptr = self.mvst_var_loc_map[src_name]
             self.decref(fetype, self.builder.load(ptr))
             if (
                 self._cur_ir_block == self.blocks[self.lastblk]
-                and not self.poly_cleaned
+                and not self.poly_mvst_cleaned
             ):
-                # Zero-fill the debug union for polymorphic only
-                # at the last block
+                # Zero-fill polymorphic variables at the last block
                 for v in self.poly_var_loc_map.values():
                     self.builder.store(
                         llvm_ir.Constant(v.type.pointee, None), v
                     )
-                    self.poly_cleaned = True
+                # Zero-fill m.v.s.t. variables at the last block
+                for v in self.mvst_var_loc_map.values():
+                    self.builder.store(
+                        llvm_ir.Constant(v.type.pointee, None), v
+                    )
+                self.poly_mvst_cleaned = True
             return
 
         super().delvar(name)
@@ -1967,6 +1992,9 @@ class CUDALower(Lower):
                 self.poly_var_loc_map[src_name], llvm_ir.PointerType(lltype)
             )
             return castptr
+        elif name in self.mvst_var_set:
+            src_name = name.split(".")[0]
+            return self.mvst_var_loc_map[src_name]
         else:
             return super().getvar(name)
 

@@ -495,17 +495,13 @@ class TestCudaDebugInfo(CUDATestCase):
             CHECK-NOT: !dbg
             CHECK: store double 0.0, double* %[[VAL_4]]
             CHECK-NOT: !dbg
-            CHECK: %[[VAL_5:.*]] = alloca double
+            CHECK: %[[VAL_5:.*]] = alloca i8*
             CHECK-NOT: !dbg
-            CHECK: store double 0.0, double* %[[VAL_5]]
+            CHECK: store i8* null, i8** %[[VAL_5]]
             CHECK-NOT: !dbg
             CHECK: %[[VAL_6:.*]] = alloca i8*
             CHECK-NOT: !dbg
             CHECK: store i8* null, i8** %[[VAL_6]]
-            CHECK-NOT: !dbg
-            CHECK: %[[VAL_7:.*]] = alloca i8*
-            CHECK-NOT: !dbg
-            CHECK: store i8* null, i8** %[[VAL_7]]
             CHECK-NOT: !dbg
 
             CHECK: br label %"[[ENTRY:.+]]"
