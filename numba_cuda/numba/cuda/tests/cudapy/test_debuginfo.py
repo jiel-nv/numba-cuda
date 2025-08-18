@@ -326,7 +326,7 @@ class TestCudaDebugInfo(CUDATestCase):
         match = re.compile(pat).search(llvm_ir)
         self.assertIsNone(match, msg=llvm_ir)
 
-    def test_llvm_dbg_value(self):
+    def test_llvm_dbg_declare(self):
         sig = (types.int32, types.int32)
 
         @cuda.jit("void(int32, int32)", debug=True, opt=False)
@@ -337,13 +337,13 @@ class TestCudaDebugInfo(CUDATestCase):
             z4 = True  # noqa: F841
 
         llvm_ir = f.inspect_llvm(sig)
-        # Verify the call to llvm.dbg.declare is replaced by llvm.dbg.value
+        # Verify the call to llvm.dbg.value is replaced by llvm.dbg.declare
         pat1 = r'call void @"llvm.dbg.declare"'
         match = re.compile(pat1).search(llvm_ir)
-        self.assertIsNone(match, msg=llvm_ir)
+        self.assertIsNotNone(match, msg=llvm_ir)
         pat2 = r'call void @"llvm.dbg.value"'
         match = re.compile(pat2).search(llvm_ir)
-        self.assertIsNotNone(match, msg=llvm_ir)
+        self.assertIsNone(match, msg=llvm_ir)
 
     def test_no_user_var_alias(self):
         sig = (types.int32, types.int32)

@@ -618,11 +618,13 @@ class CUDADIBuilder(DIBuilder):
             # Do not emit llvm.dbg.declare on user variable alias
             return
         else:
-            int_type = (ir.IntType,)
-            real_type = ir.FloatType, ir.DoubleType
-            if isinstance(lltype, int_type + real_type):
-                # Start with scalar variable, swtiching llvm.dbg.declare
-                # to llvm.dbg.value
+            if (
+                argidx is not None
+                and datamodel is not None
+                and isinstance(datamodel.fe_type, types.Boolean)
+            ):
+                # Keep using llvm.dbg.value for boolean argument
+                # due to a backend issue
                 return
             else:
                 return super().mark_variable(

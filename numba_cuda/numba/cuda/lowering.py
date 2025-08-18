@@ -1835,12 +1835,11 @@ class CUDALower(Lower):
             # No emission of debuginfo for internal names
             and not name.startswith("$")
         ):
-            # Emit debug value for user variable
+            # Keep using llvm.dbg.value for boolean argument due to a backend
+            # issue
             fetype = self.typeof(name)
             lltype = self.context.get_value_type(fetype)
-            int_type = (llvm_ir.IntType,)
-            real_type = llvm_ir.FloatType, llvm_ir.DoubleType
-            if isinstance(lltype, int_type + real_type):
+            if argidx is not None and isinstance(fetype, types.Boolean):
                 src_name = name.split(".")[0]
                 if src_name in self.poly_var_typ_map:
                     # Do not emit debug value on polymorphic type var
