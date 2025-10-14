@@ -619,7 +619,10 @@ class CUDADIBuilder(DIBuilder):
                 # Ignore the "tag" field, focus on the "payload" field which
                 # contains the data types in memory
                 if field == "payload":
-                    for mod in model.inner_models():
+                    # Store metadata dictionaries to create members later with scope
+                    member_metadata_dicts = []
+                    
+                    for index, mod in enumerate(model.inner_models()):
                         dtype = mod.get_value_type()
                         membersize = self.cgctx.get_abi_sizeof(dtype)
                         basetype = self._var_type(
@@ -632,33 +635,110 @@ class CUDADIBuilder(DIBuilder):
                         # Use a prefix "_" on type names as field names
                         membername = "_" + typename
                         memberwidth = _BYTE_SIZE * membersize
-                        derived_type = m.add_debug_info(
-                            "DIDerivedType",
-                            {
-                                "tag": ir.DIToken("DW_TAG_member"),
-                                "name": membername,
-                                "baseType": basetype,
-                                # DW_TAG_member size is in bits
-                                "size": memberwidth,
-                            },
-                        )
-                        meta.append(derived_type)
+                        # Build the metadata dictionary
+                        metadata_dict = {
+                            "tag": ir.DIToken("DW_TAG_member"),
+                            "name": membername,
+                            "baseType": basetype,
+                            # DW_TAG_member size is in bits
+                            "size": memberwidth,
+                        }
+                        
+                        if config.GA_DEBUG_FEATURE and index > 0:
+                            # Use typed constant (i8) with patched llvmlite                            
+                            metadata_dict["extraData"] = ir.IntType(8)(index) if config.GA_DEBUG_FEATURE==1 else m.add_metadata([ir.IntType(8)(index)])
+                        
+                        # Store for later creation
+                        member_metadata_dicts.append(metadata_dict)
+                        
                         if memberwidth > maxwidth:
                             maxwidth = memberwidth
+                    
+                    # Now create the members without scope first (for non-GA_DEBUG_FEATURE)
+                    if not config.GA_DEBUG_FEATURE:
+                        for metadata_dict in member_metadata_dicts:
+                            derived_type = m.add_debug_info("DIDerivedType", metadata_dict)
+                            print(f"  Emitted derived_type {derived_type}")
+                            meta.append(derived_type)
 
-            fake_union_name = "dbg_poly_union"
-            return m.add_debug_info(
-                "DICompositeType",
-                {
-                    "file": self.difile,
-                    "tag": ir.DIToken("DW_TAG_union_type"),
-                    "name": fake_union_name,
-                    "identifier": str(lltype),
-                    "elements": m.add_metadata(meta),
-                    "size": maxwidth,
-                },
-                is_distinct=True,
-            )
+            if config.GA_DEBUG_FEATURE:
+                print(f"GA_DEBUG_FEATURE: Processing union type '{lltype}'")
+                print(f"  Max width: {maxwidth}")
+                flex = []
+                discriminator = m.add_debug_info(
+                    "DIDerivedType",
+                    {
+                        "tag": ir.DIToken("DW_TAG_member"),
+                        "name": "discriminator",
+                        "baseType": m.add_debug_info("DIBasicType", {
+                            "name": "int", "size": _BYTE_SIZE, "encoding": ir.DIToken("DW_ATE_unsigned")}),
+                        "size": _BYTE_SIZE,
+                        "flags": ir.DIToken("DIFlagArtificial"),
+                    },
+                )
+                print(f"  Emitted discriminator {discriminator}")
+                
+                # Create the member DIDerivedTypes (without scope for now to avoid circular dependency)
+                for index, metadata_dict in enumerate(member_metadata_dicts):
+                    # Note: We don't add scope here to avoid circular reference
+                    # The members will be inside variant_part via elements
+                    derived_type = m.add_debug_info("DIDerivedType", metadata_dict)
+                    if index > 0:
+                        print(f"  Adding extraData with typed constant: i8 {index}")
+                    print(f"  Emitted derived_type {derived_type}")
+                    meta.append(derived_type)
+                
+                # Create wrapper_struct (only once, with proper elements)
+                wrapper_struct_size = 2 * maxwidth
+                
+                # Create the final variant_part with actual members and scope
+                # (Note: scope will be added after wrapper_struct is created)
+                variant_part = m.add_debug_info(
+                    "DICompositeType",
+                    {
+                        "file": self.difile,
+                        "tag": ir.DIToken("DW_TAG_variant_part"),
+                        "name": "dbg_poly_disc_union_variant_part",
+                        "identifier": str(lltype),
+                        "elements": m.add_metadata(meta),
+                        "size": maxwidth,
+                        "discriminator": discriminator,
+                        # Note: scope cannot be added here due to circular dependency
+                    },
+                    is_distinct=False,  # Not distinct
+                )
+                print(f"  Emitted variant part type {variant_part}")
+                
+                # Now create wrapper_struct with variant_part in elements (only once)
+                flex.append(variant_part)
+                wrapper_struct = m.add_debug_info(
+                    "DICompositeType",
+                    {
+                        "file": self.difile,
+                        "tag": ir.DIToken("DW_TAG_structure_type"),
+                        "name": "dbg_poly_disc_union_struct",
+                        "identifier": str(lltype),
+                        "elements": m.add_metadata(flex),
+                        "size": wrapper_struct_size,
+                    },
+                    is_distinct=True,
+                )
+                print(f"  Emitted wrapper structure type {wrapper_struct} (size: {wrapper_struct_size} bits)")
+                return wrapper_struct
+            else:
+                fake_union_name = "dbg_poly_union"
+                return m.add_debug_info(
+                    "DICompositeType",
+                    {
+                        "file": self.difile,
+                        "tag": ir.DIToken("DW_TAG_union_type"),
+                        "name": fake_union_name,
+                        "identifier": str(lltype),
+                        "elements": m.add_metadata(meta),
+                        "size": maxwidth,
+                    },
+                    is_distinct=True,
+                )
         # For other cases, use upstream Numba implementation
         return super()._var_type(lltype, size, datamodel=datamodel)
 

@@ -1688,7 +1688,74 @@ class CUDALower(Lower):
     def storevar(self, value, name, argidx=None):
         """
         Store the value into the given variable.
+        For polymorphic variables, also writes the discriminant.
         """
+        # Handle polymorphic variables BEFORE calling parent
+        src_name = name.split(".")[0]
+        if src_name in self.poly_var_typ_map:
+            # Ensure allocation happens first
+            fetype = self.typeof(name)
+            if name not in self.varmap and self.store_var_needed(name):
+                self._alloca_var(name, fetype)
+            
+            # Now the variable should be in poly_var_set and poly_var_loc_map
+            if src_name not in self.poly_var_loc_map:
+                # Shouldn't happen, but handle gracefully
+                super().storevar(value, name, argidx)
+                return
+            
+            ptr = self.poly_var_loc_map[src_name]
+            
+            if config.GA_DEBUG_FEATURE:
+                # Write discriminant to beginning of union as i8
+                dtype = types.UnionType(self.poly_var_typ_map[src_name])
+                
+                # Compute discriminant value: index of this type in sorted union
+                # Need to unliteral the type since dtype.types contains unliteral types
+                lookup_type = fetype.literal_type if isinstance(fetype, types.Literal) else fetype
+                discriminant_value = list(dtype.types).index(lookup_type)
+                
+                # Bitcast union pointer directly to i8* and write discriminant at offset 0
+                discriminant_ptr = self.builder.bitcast(
+                    ptr,
+                    llvm_ir.PointerType(llvm_ir.IntType(8))
+                )
+                discriminant_i8 = llvm_ir.Constant(
+                    llvm_ir.IntType(8), 
+                    discriminant_value
+                )
+                self.builder.store(discriminant_i8, discriminant_ptr)
+                
+                print(f"  Writing discriminant {discriminant_value} for "
+                      f"variable '{src_name}' (type: {fetype})")
+                
+                # Write value to element 1 (skip discriminant at element 0)
+                # GEP with 2 indices: [0, 1] - dereference pointer, then access element 1
+                value_ptr = self.builder.gep(
+                    ptr,
+                    [llvm_ir.Constant(llvm_ir.IntType(32), 0),
+                     llvm_ir.Constant(llvm_ir.IntType(32), 1)],
+                    inbounds=False
+                )
+                lltype = self.context.get_value_type(fetype)
+                castptr = self.builder.bitcast(
+                    value_ptr, 
+                    llvm_ir.PointerType(lltype)
+                )
+                self.builder.store(value, castptr)
+            else:
+                # Without GA_DEBUG_FEATURE: UniTuple(maxsizetype, 1)
+                # Just store the value directly
+                lltype = self.context.get_value_type(fetype)
+                castptr = self.builder.bitcast(
+                    ptr, llvm_ir.PointerType(lltype)
+                )
+                self.builder.store(value, castptr)
+            # Don't call super().storevar() for polymorphic vars
+            # They're handled specially above
+            return
+        
+        # For non-polymorphic variables, use parent implementation
         super().storevar(value, name, argidx)
 
         # Emit llvm.dbg.value instead of llvm.dbg.declare for local scalar
@@ -1814,8 +1881,16 @@ class CUDALower(Lower):
                     datamodel = self.context.data_model_manager[dtype]
                     # UnionType has sorted set of types, max at last index
                     maxsizetype = dtype.types[-1]
-                    # Create a single element aggregate type
-                    aggr_type = types.UniTuple(maxsizetype, 1)
+                    if config.GA_DEBUG_FEATURE:
+                        # allocate double the size of the max size type
+                        print(f"GA_DEBUG_FEATURE: Processing polymorphic variable '{src_name}'")
+                        print(f"  Union types: {dtype.types}")
+                        print(f"  Max size type: {maxsizetype}")
+                        aggr_type = types.UniTuple(maxsizetype, 2)
+                        print(f"  Allocating 2x size: {aggr_type}")
+                    else:
+                        # Create a single element aggregate type
+                        aggr_type = types.UniTuple(maxsizetype, 1)                    
                     lltype = self.context.get_value_type(aggr_type)
                     ptr = self.alloca_lltype(src_name, lltype, datamodel)
                     # save the location of the union type for polymorphic var
@@ -1866,9 +1941,26 @@ class CUDALower(Lower):
             src_name = name.split(".")[0]
             fetype = self.typeof(name)
             lltype = self.context.get_value_type(fetype)
-            castptr = self.builder.bitcast(
-                self.poly_var_loc_map[src_name], llvm_ir.PointerType(lltype)
-            )
+            
+            if config.GA_DEBUG_FEATURE:
+                # Read from element 1 of UniTuple(maxsizetype, 2)
+                ptr = self.poly_var_loc_map[src_name]
+                # GEP with 2 indices: [0, 1] - dereference pointer, then access element 1
+                value_ptr = self.builder.gep(
+                    ptr,
+                    [llvm_ir.Constant(llvm_ir.IntType(32), 0),
+                     llvm_ir.Constant(llvm_ir.IntType(32), 1)],
+                    inbounds=False
+                )
+                castptr = self.builder.bitcast(
+                    value_ptr, llvm_ir.PointerType(lltype)
+                )
+            else:
+                # Without GA_DEBUG_FEATURE: read directly
+                castptr = self.builder.bitcast(
+                    self.poly_var_loc_map[src_name], 
+                    llvm_ir.PointerType(lltype)
+                )
             return castptr
         else:
             return super().getvar(name)
