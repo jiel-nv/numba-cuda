@@ -760,7 +760,6 @@ class CUDADIBuilder(DIBuilder):
                         "elements": elements_metadata,
                         "size": wrapper_struct_size,
                     },
-                    is_distinct=True,
                 )
                 if JL_DEBUG:
                     print(f"  Emitted wrapper structure {wrapper_struct} (size: {wrapper_struct_size} bits)")
