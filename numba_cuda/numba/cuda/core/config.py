@@ -383,9 +383,6 @@ class _EnvReloader(object):
         # Dump IR in such as way as to aid in "diff"ing.
         DIFF_IR = _readenv("NUMBA_DIFF_IR", int, 0)
 
-        # Debug polymorphic variable handling in lowering
-        GA_DEBUG_FEATURE = _readenv("NUMBA_GA_DEBUG_FEATURE", int, 0)
-
         # Dump type annotation in html format
         def fmt_html_path(path):
             if path is None:

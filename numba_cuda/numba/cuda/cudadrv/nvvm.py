@@ -244,13 +244,6 @@ class CompilationUnit(object):
             return f"-{k}={v}".encode("utf-8")
 
         options = [stringify_option(k, v) for k, v in options.items()]
-        if True:
-            options.append('-Xllc'.encode("utf-8"))
-            options.append('-asm-verbose'.encode("utf-8"))
-            import os
-            if os.environ.get('NUMBA_NVVM_SOLID', None) is not None:
-                options.append('-nvvm-version=nvvm-latest'.encode("utf-8"))
-            print(f'FIXME: libnvvm Options: {options}')
         option_ptrs = (c_char_p * len(options))(*[c_char_p(x) for x in options])
 
         # We keep both the options and the pointers to them so that options are

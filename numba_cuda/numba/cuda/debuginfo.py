@@ -12,6 +12,9 @@ from numba.cuda import cgutils
 from numba.core.datamodel.models import ComplexModel, UnionModel, UniTupleModel
 from numba.cuda.types import GridGroup
 
+# Debug printing control
+JL_DEBUG = int(os.environ.get("NUMBA_JL_DEBUG", "0"))
+
 
 @contextmanager
 def suspend_emission(builder):
@@ -644,9 +647,9 @@ class CUDADIBuilder(DIBuilder):
                             "size": memberwidth,
                         }
                         
-                        if config.GA_DEBUG_FEATURE and index > 0:
+                        if config.CUDA_DEBUG_POLY:
                             # Use typed constant (i8) with patched llvmlite                            
-                            metadata_dict["extraData"] = ir.IntType(8)(index) if config.GA_DEBUG_FEATURE==1 else m.add_metadata([ir.IntType(8)(index)])
+                            metadata_dict["extraData"] = ir.IntType(8)(index) if config.CUDA_DEBUG_POLY==1 else m.add_metadata([ir.IntType(8)(index)])
                         
                         # Store for later creation
                         member_metadata_dicts.append(metadata_dict)
@@ -654,17 +657,26 @@ class CUDADIBuilder(DIBuilder):
                         if memberwidth > maxwidth:
                             maxwidth = memberwidth
                     
-                    # Now create the members without scope first (for non-GA_DEBUG_FEATURE)
-                    if not config.GA_DEBUG_FEATURE:
+                    # Now create the members without scope first (for non-CUDA_DEBUG_POLY)
+                    if not config.CUDA_DEBUG_POLY:
                         for metadata_dict in member_metadata_dicts:
                             derived_type = m.add_debug_info("DIDerivedType", metadata_dict)
-                            print(f"  Emitted derived_type {derived_type}")
+                            if JL_DEBUG:
+                                print(f"CUDA_DEBUG_POLY not enabled!")
+                                print(f"  Emitted derived_type {derived_type}")
                             meta.append(derived_type)
 
-            if config.GA_DEBUG_FEATURE:
-                print(f"GA_DEBUG_FEATURE: Processing union type '{lltype}'")
-                print(f"  Max width: {maxwidth}")
+            if config.CUDA_DEBUG_POLY:
+                if JL_DEBUG:
+                    print(f"CUDA_DEBUG_POLY: Processing union type '{lltype}'")
+                    print(f"  Max width: {maxwidth}")
                 flex = []
+                
+                # Create wrapper_struct size
+                wrapper_struct_size = 2 * maxwidth
+                
+                # Create discriminator without scope to avoid duplicate wrapper_struct nodes
+                # (llvmlite's immutable metadata makes forward references difficult)
                 discriminator = m.add_debug_info(
                     "DIDerivedType",
                     {
@@ -676,54 +688,86 @@ class CUDADIBuilder(DIBuilder):
                         "flags": ir.DIToken("DIFlagArtificial"),
                     },
                 )
-                print(f"  Emitted discriminator {discriminator}")
+                if JL_DEBUG:
+                    print(f"  Emitted discriminator {discriminator}")
                 
                 # Create the member DIDerivedTypes (without scope for now to avoid circular dependency)
                 for index, metadata_dict in enumerate(member_metadata_dicts):
                     # Note: We don't add scope here to avoid circular reference
                     # The members will be inside variant_part via elements
                     derived_type = m.add_debug_info("DIDerivedType", metadata_dict)
-                    if index > 0:
+                    if JL_DEBUG:
                         print(f"  Adding extraData with typed constant: i8 {index}")
-                    print(f"  Emitted derived_type {derived_type}")
+                        print(f"  Emitted derived_type {derived_type}")
                     meta.append(derived_type)
                 
-                # Create wrapper_struct (only once, with proper elements)
-                wrapper_struct_size = 2 * maxwidth
+                # Create the final variant_part with actual members
+                # Create elements metadata first to get its unique ID
+                variant_elements_metadata = m.add_metadata(meta)
                 
-                # Create the final variant_part with actual members and scope
-                # (Note: scope will be added after wrapper_struct is created)
-                variant_part = m.add_debug_info(
+                # Use the metadata object's address as unique identifier
+                variant_unique_identifier = str(id(variant_elements_metadata))
+                
+                variant_part_type = m.add_debug_info(
                     "DICompositeType",
                     {
                         "file": self.difile,
                         "tag": ir.DIToken("DW_TAG_variant_part"),
-                        "name": "dbg_poly_disc_union_variant_part",
-                        "identifier": str(lltype),
-                        "elements": m.add_metadata(meta),
+                        "name": "disc_union_variant_part",
+                        "identifier": variant_unique_identifier,
+                        "elements": variant_elements_metadata,
                         "size": maxwidth,
                         "discriminator": discriminator,
-                        # Note: scope cannot be added here due to circular dependency
                     },
                     is_distinct=False,  # Not distinct
                 )
-                print(f"  Emitted variant part type {variant_part}")
+                if JL_DEBUG:
+                    print(f"  Emitted variant part type {variant_part_type}")
+                    print(f"  Variant unique identifier: {variant_unique_identifier}")
                 
-                # Now create wrapper_struct with variant_part in elements (only once)
-                flex.append(variant_part)
+                # Wrap variant_part in a DIDerivedType member with offset
+                # This gives it DW_AT_data_member_location in DWARF
+                variant_part_member = m.add_debug_info(
+                    "DIDerivedType",
+                    {
+                        "tag": ir.DIToken("DW_TAG_member"),
+                        "baseType": variant_part_type,
+                        "size": maxwidth,
+                        "offset": maxwidth,  # Starts at bit 64 (byte 8)
+                    }
+                )
+                if JL_DEBUG:
+                    print(f"  Emitted variant part member {variant_part_member}")
+                    print(f"  Wrapped variant part in member with offset {maxwidth} bits")
+                
+                # Now create wrapper_struct with discriminator and variant_part in elements
+                flex.append(discriminator)          # Add discriminator at offset 0
+                flex.append(variant_part_member)    # Add variant_part member at offset 64
+                
+                # Create elements metadata first to get its unique ID
+                elements_metadata = m.add_metadata(flex)
+                
+                # Use the metadata object's address as unique identifier
+                unique_identifier = str(id(elements_metadata))
+                
                 wrapper_struct = m.add_debug_info(
                     "DICompositeType",
                     {
                         "file": self.difile,
                         "tag": ir.DIToken("DW_TAG_structure_type"),
-                        "name": "dbg_poly_disc_union_struct",
-                        "identifier": str(lltype),
-                        "elements": m.add_metadata(flex),
+                        "name": "disc_union_wrapper_struct",
+                        "identifier": unique_identifier,
+                        "elements": elements_metadata,
                         "size": wrapper_struct_size,
                     },
                     is_distinct=True,
                 )
-                print(f"  Emitted wrapper structure type {wrapper_struct} (size: {wrapper_struct_size} bits)")
+                if JL_DEBUG:
+                    print(f"  Emitted wrapper structure {wrapper_struct} (size: {wrapper_struct_size} bits)")
+                    print(f"  Unique identifier: {unique_identifier}")
+                    print(f"  Discriminator metadata: {discriminator}")
+                    print(f"  Variant part metadata: {variant_part_type}")
+                
                 return wrapper_struct
             else:
                 fake_union_name = "dbg_poly_union"

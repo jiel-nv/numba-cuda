@@ -29,6 +29,7 @@ from numba.cuda.core.funcdesc import default_mangler
 from numba.cuda.core.environment import Environment
 from numba.cuda.core.analysis import compute_use_defs, must_use_alloca
 from numba.cuda.misc.firstlinefinder import get_func_body_first_lineno
+from numba.cuda.utils import _readenv
 from numba import version_info
 
 numba_version = version_info.short
@@ -39,6 +40,15 @@ if numba_version > (0, 60):
 
 _VarArgItem = namedtuple("_VarArgItem", ("vararg", "index"))
 
+# Check environment variable or config for Debug Polymorphic GA enablement
+DEBUG_POLY_GA = _readenv("NUMBA_CUDA_DEBUG_POLY", bool, False) or getattr(
+    config, "NUMBA_CUDA_DEBUG_POLY", False
+)
+if not hasattr(config, "NUMBA_CUDA_DEBUG_POLY"):
+    config.CUDA_DEBUG_POLY = DEBUG_POLY_GA
+
+# Debug printing control
+JL_DEBUG = _readenv("NUMBA_JL_DEBUG", int, 0)
 
 class BaseLower(object):
     """
@@ -1706,7 +1716,7 @@ class CUDALower(Lower):
             
             ptr = self.poly_var_loc_map[src_name]
             
-            if config.GA_DEBUG_FEATURE:
+            if config.CUDA_DEBUG_POLY:
                 # Write discriminant to beginning of union as i8
                 dtype = types.UnionType(self.poly_var_typ_map[src_name])
                 
@@ -1726,8 +1736,9 @@ class CUDALower(Lower):
                 )
                 self.builder.store(discriminant_i8, discriminant_ptr)
                 
-                print(f"  Writing discriminant {discriminant_value} for "
-                      f"variable '{src_name}' (type: {fetype})")
+                if JL_DEBUG:
+                    print(f"  Writing discriminant {discriminant_value} for "
+                          f"variable '{src_name}' (type: {fetype})")
                 
                 # Write value to element 1 (skip discriminant at element 0)
                 # GEP with 2 indices: [0, 1] - dereference pointer, then access element 1
@@ -1744,7 +1755,7 @@ class CUDALower(Lower):
                 )
                 self.builder.store(value, castptr)
             else:
-                # Without GA_DEBUG_FEATURE: UniTuple(maxsizetype, 1)
+                # Without CUDA_DEBUG_POLY: UniTuple(maxsizetype, 1)
                 # Just store the value directly
                 lltype = self.context.get_value_type(fetype)
                 castptr = self.builder.bitcast(
@@ -1881,13 +1892,15 @@ class CUDALower(Lower):
                     datamodel = self.context.data_model_manager[dtype]
                     # UnionType has sorted set of types, max at last index
                     maxsizetype = dtype.types[-1]
-                    if config.GA_DEBUG_FEATURE:
+                    if config.CUDA_DEBUG_POLY:
                         # allocate double the size of the max size type
-                        print(f"GA_DEBUG_FEATURE: Processing polymorphic variable '{src_name}'")
-                        print(f"  Union types: {dtype.types}")
-                        print(f"  Max size type: {maxsizetype}")
+                        if JL_DEBUG:
+                            print(f"CUDA_DEBUG_POLY: Processing polymorphic variable '{src_name}'")
+                            print(f"  Union types: {dtype.types}")
+                            print(f"  Max size type: {maxsizetype}")
                         aggr_type = types.UniTuple(maxsizetype, 2)
-                        print(f"  Allocating 2x size: {aggr_type}")
+                        if JL_DEBUG:
+                            print(f"  Allocating 2x size: {aggr_type}")
                     else:
                         # Create a single element aggregate type
                         aggr_type = types.UniTuple(maxsizetype, 1)                    
@@ -1942,7 +1955,7 @@ class CUDALower(Lower):
             fetype = self.typeof(name)
             lltype = self.context.get_value_type(fetype)
             
-            if config.GA_DEBUG_FEATURE:
+            if config.CUDA_DEBUG_POLY:
                 # Read from element 1 of UniTuple(maxsizetype, 2)
                 ptr = self.poly_var_loc_map[src_name]
                 # GEP with 2 indices: [0, 1] - dereference pointer, then access element 1
@@ -1956,7 +1969,7 @@ class CUDALower(Lower):
                     value_ptr, llvm_ir.PointerType(lltype)
                 )
             else:
-                # Without GA_DEBUG_FEATURE: read directly
+                # Without CUDA_DEBUG_POLY: read directly
                 castptr = self.builder.bitcast(
                     self.poly_var_loc_map[src_name], 
                     llvm_ir.PointerType(lltype)
