@@ -41,11 +41,12 @@ if numba_version > (0, 60):
 _VarArgItem = namedtuple("_VarArgItem", ("vararg", "index"))
 
 # Check environment variable or config for Debug Polymorphic GA enablement
-DEBUG_POLY_GA = _readenv("NUMBA_CUDA_DEBUG_POLY", bool, False) or getattr(
-    config, "NUMBA_CUDA_DEBUG_POLY", False
+# Read as int to support strategies: 1, 2, 3
+DEBUG_POLY = _readenv("NUMBA_CUDA_DEBUG_POLY", int, 0) or getattr(
+    config, "NUMBA_CUDA_DEBUG_POLY", 0
 )
 if not hasattr(config, "NUMBA_CUDA_DEBUG_POLY"):
-    config.CUDA_DEBUG_POLY = DEBUG_POLY_GA
+    config.CUDA_DEBUG_POLY = DEBUG_POLY
 
 # Debug printing control
 JL_DEBUG = _readenv("NUMBA_JL_DEBUG", int, 0)

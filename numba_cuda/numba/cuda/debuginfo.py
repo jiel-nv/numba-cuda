@@ -638,6 +638,7 @@ class CUDADIBuilder(DIBuilder):
                         # Use a prefix "_" on type names as field names
                         membername = "_" + typename
                         memberwidth = _BYTE_SIZE * membersize
+                        
                         # Build the metadata dictionary
                         metadata_dict = {
                             "tag": ir.DIToken("DW_TAG_member"),
@@ -649,7 +650,15 @@ class CUDADIBuilder(DIBuilder):
                         
                         if config.CUDA_DEBUG_POLY:
                             # Use typed constant (i8) with patched llvmlite                            
-                            metadata_dict["extraData"] = ir.IntType(8)(index) if config.CUDA_DEBUG_POLY==1 else m.add_metadata([ir.IntType(8)(index)])
+                            metadata_dict["extraData"] = ir.IntType(8)(index)
+                            
+                            # Strategy 3 only: Add offset to each variant member
+                            # Strategy 1 & 2: No offsets on individual members
+                            if config.CUDA_DEBUG_POLY == 3:
+                                # Offset equals the element's own width in bits
+                                # bool (8 bits) → offset = 8, int32 (32 bits) → offset = 32
+                                # float64 (64 bits) → offset = 64, int64 (64 bits) → offset = 64
+                                metadata_dict["offset"] = memberwidth
                         
                         # Store for later creation
                         member_metadata_dicts.append(metadata_dict)
@@ -698,7 +707,8 @@ class CUDADIBuilder(DIBuilder):
                     derived_type = m.add_debug_info("DIDerivedType", metadata_dict)
                     if JL_DEBUG:
                         print(f"  Adding extraData with typed constant: i8 {index}")
-                        print(f"  Emitted derived_type {derived_type}")
+                        offset_info = f", offset: {metadata_dict.get('offset', 'none')}" if 'offset' in metadata_dict else ""
+                        print(f"  Emitted derived_type {derived_type}{offset_info}")
                     meta.append(derived_type)
                 
                 # Create the final variant_part with actual members
@@ -708,41 +718,58 @@ class CUDADIBuilder(DIBuilder):
                 # Use the metadata object's address as unique identifier
                 variant_unique_identifier = str(id(variant_elements_metadata))
                 
+                # Create variant_part with strategy-specific offset
+                variant_part_dict = {
+                    "file": self.difile,
+                    "tag": ir.DIToken("DW_TAG_variant_part"),
+                    "name": "disc_union_variant_part",
+                    "identifier": variant_unique_identifier,
+                    "elements": variant_elements_metadata,
+                    "size": maxwidth,
+                    "discriminator": discriminator,
+                }
+                
+                # Strategy 1 only: Add offset to variant_part (not on individual members)
+                # Strategy 2 & 3: No offset on variant_part itself
+                if config.CUDA_DEBUG_POLY == 1:
+                    variant_part_dict["offset"] = maxwidth
+                
                 variant_part_type = m.add_debug_info(
                     "DICompositeType",
-                    {
-                        "file": self.difile,
-                        "tag": ir.DIToken("DW_TAG_variant_part"),
-                        "name": "disc_union_variant_part",
-                        "identifier": variant_unique_identifier,
-                        "elements": variant_elements_metadata,
-                        "size": maxwidth,
-                        "discriminator": discriminator,
-                    },
+                    variant_part_dict,
                     is_distinct=False,  # Not distinct
                 )
                 if JL_DEBUG:
-                    print(f"  Emitted variant part type {variant_part_type}")
+                    if config.CUDA_DEBUG_POLY == 1:
+                        strategy = "Strategy 1 (offset on variant_part)"
+                    elif config.CUDA_DEBUG_POLY == 2:
+                        strategy = "Strategy 2 (wrapper DIDerivedType around variant_part)"
+                    else:
+                        strategy = "Strategy 3 (offsets on members)"
+                    print(f"  Emitted variant part type {variant_part_type} [{strategy}]")
                     print(f"  Variant unique identifier: {variant_unique_identifier}")
                 
-                # Wrap variant_part in a DIDerivedType member with offset
-                # This gives it DW_AT_data_member_location in DWARF
-                variant_part_member = m.add_debug_info(
-                    "DIDerivedType",
-                    {
-                        "tag": ir.DIToken("DW_TAG_member"),
-                        "baseType": variant_part_type,
-                        "size": maxwidth,
-                        "offset": maxwidth,  # Starts at bit 64 (byte 8)
-                    }
-                )
-                if JL_DEBUG:
-                    print(f"  Emitted variant part member {variant_part_member}")
-                    print(f"  Wrapped variant part in member with offset {maxwidth} bits")
-                
-                # Now create wrapper_struct with discriminator and variant_part in elements
+                # Add discriminator first
                 flex.append(discriminator)          # Add discriminator at offset 0
-                flex.append(variant_part_member)    # Add variant_part member at offset 64
+                
+                # Strategy-specific handling of variant_part
+                if config.CUDA_DEBUG_POLY == 2:
+                    # Strategy 2: Wrap variant_part in a DIDerivedType with offset
+                    variant_part_member = m.add_debug_info(
+                        "DIDerivedType",
+                        {
+                            "tag": ir.DIToken("DW_TAG_member"),
+                            "name": "variant_part_member",
+                            "baseType": variant_part_type,
+                            "offset": maxwidth,  # 64 bits (starts at second i64)
+                        },
+                    )
+                    if JL_DEBUG:
+                        print(f"  Wrapped variant_part in DIDerivedType member {variant_part_member} with offset: {maxwidth}")
+                    flex.append(variant_part_member)
+                else:
+                    # Strategy 1 & 3: Add variant_part directly
+                    flex.append(variant_part_type)
                 
                 # Create elements metadata first to get its unique ID
                 elements_metadata = m.add_metadata(flex)
